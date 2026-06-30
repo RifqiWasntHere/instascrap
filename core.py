@@ -2,14 +2,66 @@
 Core scraping logic — shared by scrap_post.py (CLI) and server.py (HTTP server).
 
 Authenticates via session cookies, fetches image(s) + caption from an Instagram post.
+After downloading, images are compressed in-place and OCR'd for embedded text.
 """
 
+import io
 import re
 import shutil
 import sys
 from pathlib import Path
 
 import instaloader
+from PIL import Image
+
+# ── OCR engine (lazy-loaded) ─────────────────────────────────────────────
+
+_ocr_engine = None
+
+
+def _get_ocr_engine():
+    """Lazily create the RapidOCR engine — avoids slow import at module level."""
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+# ── Image post-processing ────────────────────────────────────────────────
+
+def compress_image(path: Path, max_size: int = 1080, quality: int = 85) -> Path:
+    """Compress an image in-place: resize to max_size and re-encode as JPEG.
+
+    - Preserves aspect ratio (thumbnail-style).
+    - Overwrites the original file.
+    - Returns the same Path for chaining.
+    """
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((max_size, max_size))
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    buf.seek(0)
+
+    # If the file was .png/.webp, replace with .jpg since we re-encoded as JPEG
+    if path.suffix.lower() not in (".jpg", ".jpeg"):
+        new_name = path.with_suffix(".jpg")
+        path.unlink()
+        path = new_name
+
+    path.write_bytes(buf.read())
+    return path
+
+
+def ocr_image(path: Path) -> str:
+    """Run OCR on a single image file. Returns the extracted text (joined lines)."""
+    engine = _get_ocr_engine()
+    img_bytes = path.read_bytes()
+    result, _ = engine(img_bytes)
+    if result:
+        return " ".join(line[1] for line in result)
+    return ""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -73,14 +125,22 @@ def scrape_post(
     url: str,
     loader: instaloader.Instaloader,
     download_dir: str = "downloads",
+    *,
+    compress: bool = True,
+    ocr: bool = True,
 ) -> dict:
     """Download image(s) + caption for a single Instagram post.
 
     Output layout:
         downloads/<shortcode>/caption.txt
         downloads/<shortcode>/img/<image files>
+        downloads/<shortcode>/ocr.txt       (if ocr=True and text found)
 
-    Returns dict with shortcode, caption, image_files, author, date, likes, comments, etc.
+    Args:
+        compress: Compress downloaded images in-place (resize + JPEG re-encode).
+        ocr: Run OCR on each image and save extracted text to ocr.txt.
+
+    Returns dict with shortcode, caption, image_files, ocr_texts, author, date, etc.
 
     Raises:
         AuthError: if the session is expired/invalid
@@ -144,11 +204,32 @@ def scrape_post(
         if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
     )
 
+    # ── Compress images (in-place) ──────────────────────────────────────
+    if compress and image_files:
+        compressed = []
+        for img_path in image_files:
+            new_path = compress_image(img_path)
+            compressed.append(new_path)
+        image_files = compressed
+
+    # ── OCR images ─────────────────────────────────────────────────────
+    ocr_texts: list[str] = []
+    if ocr and image_files:
+        for img_path in image_files:
+            text = ocr_image(img_path)
+            ocr_texts.append(text)
+
+        # Write combined OCR output
+        non_empty = [t for t in ocr_texts if t]
+        if non_empty:
+            (out_dir / "ocr.txt").write_text("\n\n".join(non_empty), encoding="utf-8")
+
     # ── Build result ──────────────────────────────────────────────────
     result = {
         "shortcode": shortcode,
         "caption": caption,
         "image_files": [str(f) for f in image_files],
+        "ocr_texts": ocr_texts,
         "author": post.owner_username,
         "date": post.date_utc.isoformat(),
         "likes": post.likes,

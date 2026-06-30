@@ -141,6 +141,7 @@ class ScraperHandler(BaseHTTPRequestHandler):
                 for f in result["image_files"]
             ]
             self._respond(200, result)
+            
         except core.AuthError as e:
             session.is_authenticated = False
             session.auth_error = str(e)
