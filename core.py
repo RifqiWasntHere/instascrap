@@ -133,6 +133,7 @@ def scrape_post(
 
     Output layout:
         downloads/<shortcode>/caption.txt
+        downloads/<shortcode>/img_url.txt   (Saves the raw image CDN URLs)
         downloads/<shortcode>/img/<image files>
         downloads/<shortcode>/ocr.txt       (if ocr=True and text found)
 
@@ -182,6 +183,23 @@ def scrape_post(
     if post.typename == "GraphVideo":
         raise ReelVideoError(f"Post {shortcode} is a reel/video — only image and carousel posts are supported.")
 
+    # ── Extract & Save Image URLs ─────────────────────────────────────
+    image_urls: list[str] = []
+    
+    if post.typename == "GraphSidecar":
+        # Handle carousels (extract URL for each sub-item)
+        for node in post.get_sidecar_nodes():
+            if not node.is_video:
+                image_urls.append(node.display_url)
+    else:
+        # Single image post
+        image_urls.append(post.url)
+        
+    # Write the URLs to img_url.txt (one per line)
+    if image_urls:
+        url_file = out_dir / "img_url.txt"
+        url_file.write_text("\n".join(image_urls), encoding="utf-8")
+
     # ── Image(s) ─────────────────────────────────────────────────────
     loader.download_post(post, target=shortcode)
 
@@ -228,6 +246,7 @@ def scrape_post(
     result = {
         "shortcode": shortcode,
         "caption": caption,
+        "image_urls": image_urls, # Added to dictionary response
         "image_files": [str(f) for f in image_files],
         "ocr_texts": ocr_texts,
         "author": post.owner_username,

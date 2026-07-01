@@ -1,0 +1,11 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: instascrap
+    ports:
+      - "8008:8008"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
